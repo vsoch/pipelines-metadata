@@ -1,0 +1,441 @@
+{
+  "workflowName": "hic",
+  "actualWorkflowLanguageVersion": "draft-2",
+  "submittedFiles": {
+    "workflow": "##Encode DCC Hi-C pipeline\n##Author: Ana Cismaru(anacismaru@gmail.com)\n\nimport \"hic_sub.wdl\" as sub\nworkflow hic {\n    #User inputs \n    Array[Array[Array[File]]] fastq = [] #[lib_id][fastq_id][read_end_id]\n    Array[Array[Array[File]]] input_bams = [] #[lib_id[[collisions1,collisions2],[collisions_low],[unmapped],[mapq0],[alignable]], \n    Array[Array[File]] input_sort_files = [] #[lib_id] 2d Array [lib[sort1, sirt2]]\n    Array[File] input_merged_sort = []\n    Array[File] input_dedup_pairs = []\n    File? input_pairs\n    File? input_hic\n\n    \n    File restriction_sites\n    File chrsz\n    File reference_index\n\n    #determine range of scatter\n    Int lib_length = if length(fastq) > 0 then length(fastq)\n    else if length(input_bams) > 0 then length(input_bams) ##technically the number should be same for bams and sort_files\n    else if length(input_sort_files) > 0 then length(input_sort_files)\n    else length(input_merged_sort)\n\n    #if statement includes all necesarry for creation of hic files\n    if(!defined(input_hic)){\n        #call sub workflow to support input from multiple different libraries\n        scatter(i in range(lib_length)){\n            File? sub_ms #to deal with multiple entries\n            \n            call sub.hic_sub{ input:\n                sub_fastq = if length(fastq) > 0 then fastq[i] else [],\n                sub_input_bams = if length(input_bams) > 0 then input_bams[i] else [],\n                sub_input_sort_files = if length(input_sort_files) > 0 then input_sort_files[i] else [],\n                sub_input_merged_sort = if length(input_merged_sort)>0 then input_merged_sort[i] else sub_ms,\n\n                sub_restriction_sites = restriction_sites,\n                sub_chrsz = chrsz,\n                sub_reference_index =reference_index\n            }\n        }\n    }\n    \n    call merge_pairs_file{ input:\n        not_merged_pe = if length(input_dedup_pairs)>0 then input_dedup_pairs else hic_sub.out_dedup\n    }\n\n\n    #     call create_hic { input:\n    #         pairs_file = if defined(input_pairs) then input_pairs else merge_pairs_file.out_file,\n    #         chrsz_ = chrsz     \n    #     }\n        \n    #     #  call qc_report{ input:\n    #     #  ligation = ligation,\n    #     #  merged_nodups = merge_pairs_file.out_file,\n    #     #  site_file = restriction_sites\n    #     #  }\n    # }\n    \n    # File hic = if defined(input_hic) then input_hic else create_hic.inter_hic\n    # # call tads { input:\n    #     hic_file = hic\n    # }\n\n    # call hiccups{ input:\n    #     hic_file = hic       \n    # }\n\n    # call apa{ input:\n    #     hic_file = hic,\n    #     peaks_file = hiccups.out_file       \n    # }\n    \n    output{\n        #Align task outputs\n        # Array[Array[File]] out_collisions = hic_sub.out_collisions\n        # Array[Array[File]] out_collisions_low = hic_sub.out_collisions_low\n        # Array[Array[File]] out_unmapped = hic_sub.out_unmapped\n        # Array[Array[File]] out_mapq0 = hic_sub.out_mapq0\n        # Array[Array[File]] out_alignable = hic_sub.out_alignable\n        # Array[Array[File]] out_sort_file = hic_sub.out_sort_file\n        \n        # #Merge task outputs\n        # Array[File] out_merged_collisions = hic_sub.out_merged_collisions\n        # Array[File] out_merged_collisions_low = hic_sub.out_merged_collisions_low\n        # Array[File] out_merged_unmapped = hic_sub.out_merged_unmapped\n        # Array[File] out_merged_mapq0 = hic_sub.out_merged_mapq0\n        # Array[File] out_merged_align = hic_sub.out_merged_align\n        \n        # #Merge sort outputs\n        # Array[File] out_merge_sort = hic_sub.out_merge_sort\n        # #Dedup outputs\n        # Array[File] out_dedup = hic_sub.out_dedup\n        \n        # #Merge pairs file outputs\n        # File out_merged_pairs = merge_pairs_file.out_file\n        # #Create hic outputs\n        # File out_hic = create_hic.out_file\n        # #TADs output\n        # # File out_tads = tads.out_file\n        # HiCCUps output\n        # File out_hiccups = hiccups.out_file\n\n        #QC outputs\n        #Array[File] out_align_qc = hic_sub.out_align_qc\n    }\n\n}\n\n\ntask merge_pairs_file{\n    Array[File] not_merged_pe\n    command{\n        sort -m -k2,2d -k6,6d -k4,4n -k8,8n -k1,1n -k5,5n -k3,3n --parallel=8 -S 10% ${sep=' ' not_merged_pe}  > merged_pairs.txt\n    }\n    output{\n        File out_file = glob('merged_pairs.txt')[0]\n    }\n    runtime {\n        docker : \"quay.io/gabdank/juicer:encode05022018\"\n\n       #> 8 processors\n       #> a lot of memory\n    }\n}\n\n\ntask create_hic {\n    File pairs_file\n    File chrsz_\n\n    command {\n        /opt/scripts/common/juicer_tools pre -s inter_30.txt -g inter_30_hists.m -q 30 ${pairs_file} inter_30.hic ${chrsz_}\n    }\n\n    output {\n        # add inter_30 stuff\n        #/opt/scripts/common/juicer_tools pre -s inter.txt -g inter_hists.m -q 1 ${pairs_file} inter.hic ${chrsz_}\n        #File inter_hic = glob('inter.hic')[0]\n        File inter_30= glob('inter_30.hic')[0]\n    }\n\n    runtime {\n        docker : \"quay.io/gabdank/juicer:encode05022018\"\n    }\n}\n\ntask tads {\n    File hic_file\n\n    command {\n        docker run --runtime=nvidia --entrypoint /opt/scripts/common/juicer_tools arrowhead ${hic_file} contact_domains \n    }\n\n    output {\n        File out_file = glob('contact_domains/*.bedpe')[0]\n    }\n}\n\ntask hiccups{\n    File hic_file\n    command{\n        DIR=$(dirname \"${hic_file}\")\n        FILE=$(basename \"${hic_file}\")\n        docker run --runtime=nvidia --entrypoint /opt/scripts/common/juicer_tools -v $DIR:/input quay.io/anacismaru/nvidia_juicer:test hiccups /input/$FILE loops\n    }\n    output{\n        File out_file = glob(\"loops/*.bedpe\")[0]\n    }      \n}\n\n# task apa{\n#     File hic_file\n#     File peaks_file\n#     command{\n#         docker run --runtime=nvidia --entrypoint /opt/scripts/common/juicer_tools apa ${hic_file} ${peaks_file} apa_results\n#     }\n#     output{\n#         #THIS IS PROBABLY WRONG\n#         File out_file = glob(\"apa_results\")\n#     }\n# }\n",
+    "root": "None",
+    "options": "{\n\n}",
+    "inputs": "{ \n    \"hic.fastq\": [[[\n        \"/Users/anacismaru/ENCODE/bucket/read_pairs/original_pair/read_R1.fastq.gz\",\n        \"/Users/anacismaru/ENCODE/bucket/read_pairs/original_pair/read_R2.fastq.gz\"]]], \n        \n    \"hic.chrsz\": \"/Users/anacismaru/ENCODE/bucket/encode-hic-pipeline-Freference_grch38_chr10_chrM-Fhg38_chr19_chrM.chrom.sizes\",\n    \"hic.restriction_sites\": \"/Users/anacismaru/ENCODE/bucket/encode-hic-pipeline-Freference_grch38_chr10_chrM-FGRCh38_no_alt_analysis_set_GCA_000001405.15.chr19_chrM_MboI.txt\",\n    \"hic.reference_index\": \"/Users/anacismaru/ENCODE/bucket/index.tar.gz\"\n\n}\n",
+    "labels": "{}",
+    "imports": {
+      "hic_sub.wdl": "##Encode DCC Hi-C pipeline\n##Author Ana Cismaru (anacismaru@gmail.com)\n\nworkflow hic_sub{\n    Array[Array[File]] sub_fastq = [] #[lib_id][fastq_id][read_end_id]\n    Array[Array[File]] sub_input_bams = []  #[collisions, collisions_low_mapq, unmapped, mapq0, alignable]\n    Array[File] sub_input_sort_files = []\n    File? sub_input_merged_sort #input to dedup\n    \n    File sub_restriction_sites\n    File sub_chrsz\n    File sub_reference_index\n    \n\n    #input: fastqs\n    #output: bam files\n    Int fastqs_len = length(sub_fastq)\n    scatter(i in range(fastqs_len)){\n        call align { input:\n            restriction = sub_restriction_sites,\n            fastqs = sub_fastq[i],\n            chrsz = sub_chrsz,\n            idx_tar = sub_reference_index\n        }\n    }\n      \n    Array[File] collisions = if length(sub_input_bams)>0 then sub_input_bams[0] else align.collisions  #for separate user entry point\n    Array[File] collisions_low = if length(sub_input_bams)>0 then sub_input_bams[1] else align.collisions_low_mapq\n    Array[File] unmapped = if length(sub_input_bams)>0 then sub_input_bams[2] else align.unmapped\n    Array[File] mapq0 = if length(sub_input_bams)>0 then sub_input_bams[3] else align.mapq0\n    Array[File] alignable = if length(sub_input_bams)>0 then sub_input_bams[4] else align.alignable       \n    \n    #input: bam files\n    #output: Array of merged bam files \n    call merge { input:\n        collisions = collisions,\n        collisions_low = collisions_low,\n        unmapped = unmapped,\n        mapq0 = mapq0,\n        alignable = alignable\n    }\n        \n\n    #input: sort.txt \n    #output: Array of merged sort.txt\n    call merge_sort { input:\n        sort_files_ = if length(sub_input_sort_files)>0 then sub_input_sort_files else align.sort_file,  \n    } \n\n    # call align_qc { input:\n    #     norm_res = align.norm_res\n    # }   \n\n    # we can collect the alignable.bam using the array merge.out_file\n    call dedup { input:\n        merged_sort = if defined(sub_input_merged_sort) then sub_input_merged_sort else merge_sort.out_file\n    }\n    \n    output{\n        Array[File] out_collisions = align.collisions\n        Array[File] out_collisions_low = align.collisions_low_mapq\n        Array[File] out_unmapped = align.unmapped\n        Array[File] out_mapq0 = align.mapq0\n        Array[File] out_alignable = align.alignable\n        Array[File] out_sort_file = align.sort_file\n\n        File out_merged_collisions = merge.m_collisions\n        File out_merged_collisions_low = merge.m_coll_low\n        File out_merged_unmapped = merge.m_unmap\n        File out_merged_mapq0 = merge.m_map\n        File out_merged_align = merge.m_align\n\n        File out_merge_sort = merge_sort.out_file\n        File out_dedup = dedup.out_file\n        #File out_align_qc = align_qc.out_file\n    }\n}\n\ntask align {\n\tFile idx_tar \t\t# reference bwa index tar\n\tArray[File] fastqs \t# [read_end_id]\n    File chrsz          # chromosome sizes file\n    File restriction    # restriction enzyme sites in the reference genome\n\n    Int? cpu\n  \n\n    command {     \n        echo \"Starting align\"  \n        mkdir data && cd data && mkdir reference\n        data_path=$(pwd)\n        cd reference && tar -xvf ${idx_tar}\n        index_folder=$(ls)\n        cd $index_folder\n        reference_fasta=$(ls | head -1) \n        reference_folder=$(pwd)\n        reference_index_path=$reference_folder/$reference_fasta\n        cd ../..\n       \n       # Align reads\n        echo \"Running bwa command\"\n        bwa mem -SP5M -t ${select_first([cpu,4])} $reference_index_path ${fastqs[0]} ${fastqs[1]} > result.sam\n       #GOOD UNTIL HERE\n        \n\t    # chimeric takes in $name$ext\n        echo \"Running chimeric script\"\n\t    awk -v \"fname\"=result -f /opt/scripts/common/chimeric_blacklist.awk result.sam\n\n        # if any normal reads were written, find what fragment they correspond\n \t    # to and store that\n \t    echo \"Running fragment\"\n        echo $restriction\n        /opt/scripts/common/fragment.pl result_norm.txt result_frag.txt ${restriction}   \n       \t\n        # convert sams to bams and delete the sams\n        echo \"Converting sam to bam\"\n\t    samtools view -hb result_collisions.sam > collisions.bam\n        samtools view -hb result_collisions_low_mapq.sam > collisions_low_mapq.bam\n        samtools view -hb result_unmapped.sam > unmapped.bam\n        samtools view -hb result_mapq0.sam > mapq0.bam\n        samtools view -hb result_alignable.sam > alignable.bam\n\n        #removed all sam files\n        ##restriction used to be site_file\n        rm result_collisions.sam result_collisions_low_mapq.sam result_unmapped.sam result_mapq0.sam result_alignable.sam\n    \n        # sort by chromosome, fragment, strand, and position\n\t    sort -T /opt/HIC_tmp -k2,2d -k6,6d -k4,4n -k8,8n -k1,1n -k5,5n -k3,3n result_frag.txt > sort.txt\n        if [ $? -ne 0 ]\n    \tthen\n            echo \"***! Failure during sort\"\n            exit 1x\n\t    fi\n        \n    }\n\n    output {\n        File collisions = glob(\"data/collisions.bam\")[0]\n        File collisions_low_mapq = glob(\"data/collisions_low_mapq.bam\")[0]\n        File unmapped = glob(\"data/unmapped.bam\")[0]\n        File mapq0 = glob(\"data/mapq0.bam\")[0]\n        File alignable = glob(\"data/alignable.bam\")[0]\n        File sort_file = glob(\"data/sort.txt\")[0]\n        File norm_res = glob(\"data/result_norm.txt.res.txt\")[0]\n        Array[File] out_file = [collisions,collisions_low_mapq,unmapped,mapq0,alignable]\n    }\n\n    runtime {\n        docker : \"quay.io/gabdank/juicer:encode05232018\"\n        cpu : 32\n        memory: \"64 GB\"\n    }\n}\n\ntask merge {\n    Array[File] collisions\n    Array[File] collisions_low\n    Array[File] unmapped\n    Array[File] mapq0 \n    Array[File] alignable\n     \n    command <<<\n        samtools merge merged_collisions.bam ${sep=' ' collisions} \n        samtools merge merged_collisions_lowmapq.bam ${sep=' ' collisions_low}\n        samtools merge merged_unmapped.bam ${sep=' ' unmapped}\n        samtools merge merged_mapq0.bam ${sep=' ' mapq0}\n        samtools merge merged_alignable.bam ${sep=' ' alignable} \n    >>>\n\n    output {\n        File m_collisions= glob('merged_collisions.bam')[0]\n        File m_coll_low = glob('merged_collisions_lowmapq.bam')[0]\n        File m_unmap = glob('merged_unmapped.bam')[0]\n        File m_map = glob('merged_mapq0.bam')[0]\n        File m_align = glob('merged_alignable.bam')[0]\n    }\n\n    runtime {\n        docker : \"quay.io/gabdank/juicer:encode05022018\"\n    }\n}\n\ntask merge_sort {\n   Array[File] sort_files_\n\n    command {\n        sort -m -k2,2d -k6,6d -k4,4n -k8,8n -k1,1n -k5,5n -k3,3n --parallel=8 -S 10% ${sep=' ' sort_files_}  > merged_sort.txt\n    }\n\n    output {\n        File out_file = glob('merged_sort.txt')[0]\n    }\n\n    runtime {\n        docker : \"quay.io/gabdank/juicer:encode05022018\"\n        #> 8 processors\n        #> a lot of memory\n    }\n}\n\ntask dedup {\n    File merged_sort\n\n    command {\n        touch dups.txt\n        touch optdups.txt\n        touch merged_nodups.txt\n        awk -f /opt/scripts/common/dups.awk ${merged_sort}\n    }\n\n    output {\n        File out_file = glob('merged_nodups.txt')[0]\n    }\n\n    runtime {\n        docker : \"quay.io/gabdank/juicer:encode05022018\"\n    }\n}\n\ntask align_qc {\n    Array[String] norm_res\n\t\n\n    command <<<\n\t\tpython <<CODE\t\n\t\timport json\n  count_total_reads = 0\n  count_unmapped = 0\n  count_reg = 0\n  count_norm = 0\n  count_collisions = 0\n  count_lowqcollisions = 0\n  count_mapq0 = 0\n  with open('${write_lines(norm_res)}','r') as fp:\n      norm_res = fp.read().splitlines()\n  for norm in norm_res:\n      with open(norm,'r') as fp:\n          values = fp.read().split()\n          count_total_reads += int(values[0])\n          count_unmapped += int(values[1])\n          count_reg += int(values[2])\n          count_norm += int(values[3])\n          count_collisions += int(values[4])\n          count_lowqcollisions += int(values[5])\n          count_mapq0 += int(values[6])\n      fp.close()\n  data = {\"Total reads\": count_total_reads, \"Total Unmapped\": count_unmapped, \"Total regular\": count_reg,\"Total normal\": count_norm, \"Total collisions\": count_collisions, \"Total lowqcollisions\": count_lowqcollisions,\"Total mapq0\": count_mapq0}\n\n  with open('align_qc.json', 'w') as outfile:\n      json.dump(data, outfile)\n  outfile.close()\n  CODE\n    >>>\n    output{\n        File out_file = glob(\"align_qc.json\")[0]\n    }\n    runtime{\n        cpu : 1\n\t\tmemory : \"4000 MB\"\n\t\tdisks : \"local-disk 50 HDD\" \n    }\n}"
+    }
+  },
+  "calls": {
+    "hic.hic_sub": [{
+      "executionStatus": "Done",
+      "subWorkflowMetadata": {
+        "workflowName": "hic_sub",
+        "rootWorkflowId": "790d97bd-2f95-4d13-b624-0cf516cc51db",
+        "calls": {
+          "hic_sub.merge": [{
+            "executionStatus": "Done",
+            "stdout": "/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-merge/execution/stdout",
+            "backendStatus": "Done",
+            "shardIndex": -1,
+            "outputs": {
+              "m_align": "/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-merge/execution/glob-4709a86f566f9145e550ae2160fbf105/merged_alignable.bam",
+              "m_collisions": "/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-merge/execution/glob-f2d22b942f49793caf6b0993e2b0610c/merged_collisions.bam",
+              "m_unmap": "/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-merge/execution/glob-424a3f9a758fbfe7eb85506bcfc0051c/merged_unmapped.bam",
+              "m_coll_low": "/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-merge/execution/glob-48a8cc5b582f5a9b84d09795d92566c4/merged_collisions_lowmapq.bam",
+              "m_map": "/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-merge/execution/glob-49d2d8d8c6612815b97beab28ee8c9c0/merged_mapq0.bam"
+            },
+            "runtimeAttributes": {
+              "docker": "quay.io/gabdank/juicer:encode05022018",
+              "failOnStderr": "false",
+              "maxRetries": "0",
+              "continueOnReturnCode": "0"
+            },
+            "callCaching": {
+              "allowResultReuse": false,
+              "effectiveCallCachingMode": "CallCachingOff"
+            },
+            "inputs": {
+              "unmapped": ["/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-align/shard-0/execution/glob-3e8d0b0ad8d7b395c65e466caea64369/unmapped.bam"],
+              "collisions": ["/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-align/shard-0/execution/glob-b76556d4d7bc657e18489b542e50e2dd/collisions.bam"],
+              "mapq0": ["/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-align/shard-0/execution/glob-0e332e42297c61a239c20058b776c301/mapq0.bam"],
+              "collisions_low": ["/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-align/shard-0/execution/glob-a07e75a530220ee3ab115c6819e710f8/collisions_low_mapq.bam"],
+              "alignable": ["/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-align/shard-0/execution/glob-1890eb591bb2a7d7b20ad8674fb9113a/alignable.bam"]
+            },
+            "returnCode": 0,
+            "jobId": "32298",
+            "backend": "Local",
+            "end": "2018-07-12T15:55:22.880318-07:00",
+            "dockerImageUsed": "quay.io/gabdank/juicer@sha256:a2fec5436c6ca27d3558293fb779dfcdd62147ac4407252e2b70d813e99ece09",
+            "stderr": "/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-merge/execution/stderr",
+            "callRoot": "/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-merge",
+            "attempt": 1,
+            "executionEvents": [{
+              "startTime": "2018-07-12T15:55:03.504828-07:00",
+              "description": "Pending",
+              "endTime": "2018-07-12T15:55:03.505202-07:00"
+            }, {
+              "startTime": "2018-07-12T15:55:22.880102-07:00",
+              "description": "UpdatingJobStore",
+              "endTime": "2018-07-12T15:55:22.880235-07:00"
+            }, {
+              "startTime": "2018-07-12T15:55:03.817270-07:00",
+              "description": "RunningJob",
+              "endTime": "2018-07-12T15:55:22.880102-07:00"
+            }, {
+              "startTime": "2018-07-12T15:55:03.813254-07:00",
+              "description": "WaitingForValueStore",
+              "endTime": "2018-07-12T15:55:03.813998-07:00"
+            }, {
+              "startTime": "2018-07-12T15:55:03.505202-07:00",
+              "description": "RequestingExecutionToken",
+              "endTime": "2018-07-12T15:55:03.813254-07:00"
+            }, {
+              "startTime": "2018-07-12T15:55:03.813998-07:00",
+              "description": "PreparingJob",
+              "endTime": "2018-07-12T15:55:03.817270-07:00"
+            }],
+            "start": "2018-07-12T15:55:03.504643-07:00"
+          }],
+          "hic_sub.align": [{
+            "executionStatus": "Done",
+            "stdout": "/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-align/shard-0/execution/stdout",
+            "backendStatus": "Done",
+            "shardIndex": 0,
+            "outputs": {
+              "unmapped": "/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-align/shard-0/execution/glob-3e8d0b0ad8d7b395c65e466caea64369/unmapped.bam",
+              "collisions": "/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-align/shard-0/execution/glob-b76556d4d7bc657e18489b542e50e2dd/collisions.bam",
+              "collisions_low_mapq": "/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-align/shard-0/execution/glob-a07e75a530220ee3ab115c6819e710f8/collisions_low_mapq.bam",
+              "out_file": ["/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-align/shard-0/execution/glob-b76556d4d7bc657e18489b542e50e2dd/collisions.bam", "/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-align/shard-0/execution/glob-a07e75a530220ee3ab115c6819e710f8/collisions_low_mapq.bam", "/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-align/shard-0/execution/glob-3e8d0b0ad8d7b395c65e466caea64369/unmapped.bam", "/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-align/shard-0/execution/glob-0e332e42297c61a239c20058b776c301/mapq0.bam", "/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-align/shard-0/execution/glob-1890eb591bb2a7d7b20ad8674fb9113a/alignable.bam"],
+              "sort_file": "/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-align/shard-0/execution/glob-d1c69b66aa3b2f1a221725e00cd2ae8c/sort.txt",
+              "mapq0": "/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-align/shard-0/execution/glob-0e332e42297c61a239c20058b776c301/mapq0.bam",
+              "norm_res": "/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-align/shard-0/execution/glob-5aba2ce30de733d43f2d1952d5e678b2/result_norm.txt.res.txt",
+              "alignable": "/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-align/shard-0/execution/glob-1890eb591bb2a7d7b20ad8674fb9113a/alignable.bam"
+            },
+            "runtimeAttributes": {
+              "docker": "quay.io/gabdank/juicer:encode05232018",
+              "failOnStderr": "false",
+              "maxRetries": "0",
+              "continueOnReturnCode": "0"
+            },
+            "callCaching": {
+              "allowResultReuse": false,
+              "effectiveCallCachingMode": "CallCachingOff"
+            },
+            "inputs": {
+              "fastqs": ["/Users/anacismaru/ENCODE/bucket/read_pairs/original_pair/read_R1.fastq.gz", "/Users/anacismaru/ENCODE/bucket/read_pairs/original_pair/read_R2.fastq.gz"],
+              "chrsz": "/Users/anacismaru/ENCODE/bucket/encode-hic-pipeline-Freference_grch38_chr10_chrM-Fhg38_chr19_chrM.chrom.sizes",
+              "restriction": "/Users/anacismaru/ENCODE/bucket/encode-hic-pipeline-Freference_grch38_chr10_chrM-FGRCh38_no_alt_analysis_set_GCA_000001405.15.chr19_chrM_MboI.txt",
+              "cpu": null,
+              "idx_tar": "/Users/anacismaru/ENCODE/bucket/index.tar.gz"
+            },
+            "returnCode": 0,
+            "jobId": "32267",
+            "backend": "Local",
+            "end": "2018-07-12T15:54:59.743242-07:00",
+            "dockerImageUsed": "quay.io/gabdank/juicer@sha256:ab1b2d2084da58a76c7343c6022e59465c04a444b4515be118ca8c537cbf747a",
+            "stderr": "/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-align/shard-0/execution/stderr",
+            "callRoot": "/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-align/shard-0",
+            "attempt": 1,
+            "executionEvents": [{
+              "startTime": "2018-07-12T15:52:37.316203-07:00",
+              "description": "RunningJob",
+              "endTime": "2018-07-12T15:54:59.742520-07:00"
+            }, {
+              "startTime": "2018-07-12T15:52:36.833817-07:00",
+              "description": "PreparingJob",
+              "endTime": "2018-07-12T15:52:37.316203-07:00"
+            }, {
+              "startTime": "2018-07-12T15:52:36.828922-07:00",
+              "description": "WaitingForValueStore",
+              "endTime": "2018-07-12T15:52:36.833817-07:00"
+            }, {
+              "startTime": "2018-07-12T15:52:36.649915-07:00",
+              "description": "RequestingExecutionToken",
+              "endTime": "2018-07-12T15:52:36.828922-07:00"
+            }, {
+              "startTime": "2018-07-12T15:52:36.640453-07:00",
+              "description": "Pending",
+              "endTime": "2018-07-12T15:52:36.649915-07:00"
+            }, {
+              "startTime": "2018-07-12T15:54:59.742520-07:00",
+              "description": "UpdatingJobStore",
+              "endTime": "2018-07-12T15:54:59.744156-07:00"
+            }],
+            "start": "2018-07-12T15:52:36.632242-07:00"
+          }],
+          "hic_sub.merge_sort": [{
+            "executionStatus": "Done",
+            "stdout": "/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-merge_sort/execution/stdout",
+            "backendStatus": "Done",
+            "shardIndex": -1,
+            "outputs": {
+              "out_file": "/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-merge_sort/execution/glob-3fca55958f9e521cf685cb69bb0cba48/merged_sort.txt"
+            },
+            "runtimeAttributes": {
+              "docker": "quay.io/gabdank/juicer:encode05022018",
+              "failOnStderr": "false",
+              "maxRetries": "0",
+              "continueOnReturnCode": "0"
+            },
+            "callCaching": {
+              "allowResultReuse": false,
+              "effectiveCallCachingMode": "CallCachingOff"
+            },
+            "inputs": {
+              "sort_files_": ["/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-align/shard-0/execution/glob-d1c69b66aa3b2f1a221725e00cd2ae8c/sort.txt"]
+            },
+            "returnCode": 0,
+            "jobId": "32293",
+            "backend": "Local",
+            "end": "2018-07-12T15:55:04.728882-07:00",
+            "dockerImageUsed": "quay.io/gabdank/juicer@sha256:a2fec5436c6ca27d3558293fb779dfcdd62147ac4407252e2b70d813e99ece09",
+            "stderr": "/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-merge_sort/execution/stderr",
+            "callRoot": "/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-merge_sort",
+            "attempt": 1,
+            "executionEvents": [{
+              "startTime": "2018-07-12T15:55:02.816291-07:00",
+              "description": "WaitingForValueStore",
+              "endTime": "2018-07-12T15:55:02.817081-07:00"
+            }, {
+              "startTime": "2018-07-12T15:55:02.489572-07:00",
+              "description": "RequestingExecutionToken",
+              "endTime": "2018-07-12T15:55:02.816291-07:00"
+            }, {
+              "startTime": "2018-07-12T15:55:04.728721-07:00",
+              "description": "UpdatingJobStore",
+              "endTime": "2018-07-12T15:55:04.728880-07:00"
+            }, {
+              "startTime": "2018-07-12T15:55:03.237292-07:00",
+              "description": "RunningJob",
+              "endTime": "2018-07-12T15:55:04.728721-07:00"
+            }, {
+              "startTime": "2018-07-12T15:55:02.817081-07:00",
+              "description": "PreparingJob",
+              "endTime": "2018-07-12T15:55:03.237292-07:00"
+            }, {
+              "startTime": "2018-07-12T15:55:02.489025-07:00",
+              "description": "Pending",
+              "endTime": "2018-07-12T15:55:02.489572-07:00"
+            }],
+            "start": "2018-07-12T15:55:02.488781-07:00"
+          }],
+          "hic_sub.dedup": [{
+            "executionStatus": "Done",
+            "stdout": "/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-dedup/execution/stdout",
+            "backendStatus": "Done",
+            "shardIndex": -1,
+            "outputs": {
+              "out_file": "/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-dedup/execution/glob-4597e8834cf225f807c30b0caec03863/merged_nodups.txt"
+            },
+            "runtimeAttributes": {
+              "docker": "quay.io/gabdank/juicer:encode05022018",
+              "failOnStderr": "false",
+              "maxRetries": "0",
+              "continueOnReturnCode": "0"
+            },
+            "callCaching": {
+              "allowResultReuse": false,
+              "effectiveCallCachingMode": "CallCachingOff"
+            },
+            "inputs": {
+              "merged_sort": "/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-merge_sort/execution/glob-3fca55958f9e521cf685cb69bb0cba48/merged_sort.txt"
+            },
+            "returnCode": 0,
+            "jobId": "32309",
+            "backend": "Local",
+            "end": "2018-07-12T15:55:08.335349-07:00",
+            "dockerImageUsed": "quay.io/gabdank/juicer@sha256:a2fec5436c6ca27d3558293fb779dfcdd62147ac4407252e2b70d813e99ece09",
+            "stderr": "/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-dedup/execution/stderr",
+            "callRoot": "/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-dedup",
+            "attempt": 1,
+            "executionEvents": [{
+              "startTime": "2018-07-12T15:55:06.818794-07:00",
+              "description": "RunningJob",
+              "endTime": "2018-07-12T15:55:08.335186-07:00"
+            }, {
+              "startTime": "2018-07-12T15:55:06.816161-07:00",
+              "description": "PreparingJob",
+              "endTime": "2018-07-12T15:55:06.818794-07:00"
+            }, {
+              "startTime": "2018-07-12T15:55:06.815648-07:00",
+              "description": "WaitingForValueStore",
+              "endTime": "2018-07-12T15:55:06.816161-07:00"
+            }, {
+              "startTime": "2018-07-12T15:55:06.567084-07:00",
+              "description": "Pending",
+              "endTime": "2018-07-12T15:55:06.567424-07:00"
+            }, {
+              "startTime": "2018-07-12T15:55:08.335186-07:00",
+              "description": "UpdatingJobStore",
+              "endTime": "2018-07-12T15:55:08.335367-07:00"
+            }, {
+              "startTime": "2018-07-12T15:55:06.567424-07:00",
+              "description": "RequestingExecutionToken",
+              "endTime": "2018-07-12T15:55:06.815648-07:00"
+            }],
+            "start": "2018-07-12T15:55:06.566951-07:00"
+          }]
+        },
+        "outputs": {
+          "hic_sub.out_unmapped": ["/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-align/shard-0/execution/glob-3e8d0b0ad8d7b395c65e466caea64369/unmapped.bam"],
+          "hic_sub.out_collisions_low": ["/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-align/shard-0/execution/glob-a07e75a530220ee3ab115c6819e710f8/collisions_low_mapq.bam"],
+          "hic_sub.out_merge_sort": "/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-merge_sort/execution/glob-3fca55958f9e521cf685cb69bb0cba48/merged_sort.txt",
+          "hic_sub.out_merged_collisions_low": "/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-merge/execution/glob-48a8cc5b582f5a9b84d09795d92566c4/merged_collisions_lowmapq.bam",
+          "hic_sub.out_alignable": ["/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-align/shard-0/execution/glob-1890eb591bb2a7d7b20ad8674fb9113a/alignable.bam"],
+          "hic_sub.out_mapq0": ["/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-align/shard-0/execution/glob-0e332e42297c61a239c20058b776c301/mapq0.bam"],
+          "hic_sub.out_sort_file": ["/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-align/shard-0/execution/glob-d1c69b66aa3b2f1a221725e00cd2ae8c/sort.txt"],
+          "hic_sub.out_merged_unmapped": "/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-merge/execution/glob-424a3f9a758fbfe7eb85506bcfc0051c/merged_unmapped.bam",
+          "hic_sub.out_merged_align": "/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-merge/execution/glob-4709a86f566f9145e550ae2160fbf105/merged_alignable.bam",
+          "hic_sub.out_merged_collisions": "/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-merge/execution/glob-f2d22b942f49793caf6b0993e2b0610c/merged_collisions.bam",
+          "hic_sub.out_dedup": "/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-dedup/execution/glob-4597e8834cf225f807c30b0caec03863/merged_nodups.txt",
+          "hic_sub.out_collisions": ["/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-align/shard-0/execution/glob-b76556d4d7bc657e18489b542e50e2dd/collisions.bam"],
+          "hic_sub.out_merged_mapq0": "/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-merge/execution/glob-49d2d8d8c6612815b97beab28ee8c9c0/merged_mapq0.bam"
+        },
+        "workflowRoot": "/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db",
+        "id": "60780079-4b53-43d4-9fa5-d7352743ab17",
+        "inputs": {
+          "sub_input_merged_sort": null,
+          "sub_input_sort_files": [],
+          "sub_restriction_sites": "/Users/anacismaru/ENCODE/bucket/encode-hic-pipeline-Freference_grch38_chr10_chrM-FGRCh38_no_alt_analysis_set_GCA_000001405.15.chr19_chrM_MboI.txt",
+          "sub_input_bams": [],
+          "sub_reference_index": "/Users/anacismaru/ENCODE/bucket/index.tar.gz",
+          "align.cpu": null,
+          "sub_fastq": [["/Users/anacismaru/ENCODE/bucket/read_pairs/original_pair/read_R1.fastq.gz", "/Users/anacismaru/ENCODE/bucket/read_pairs/original_pair/read_R2.fastq.gz"]],
+          "sub_chrsz": "/Users/anacismaru/ENCODE/bucket/encode-hic-pipeline-Freference_grch38_chr10_chrM-Fhg38_chr19_chrM.chrom.sizes"
+        },
+        "status": "Succeeded",
+        "parentWorkflowId": "790d97bd-2f95-4d13-b624-0cf516cc51db",
+        "end": "2018-07-12T15:55:23.916479-07:00",
+        "start": "2018-07-12T15:52:31.467429-07:00"
+      },
+      "shardIndex": 0,
+      "outputs": {
+        "out_merge_sort": "/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-merge_sort/execution/glob-3fca55958f9e521cf685cb69bb0cba48/merged_sort.txt",
+        "out_collisions": ["/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-align/shard-0/execution/glob-b76556d4d7bc657e18489b542e50e2dd/collisions.bam"],
+        "out_sort_file": ["/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-align/shard-0/execution/glob-d1c69b66aa3b2f1a221725e00cd2ae8c/sort.txt"],
+        "out_merged_collisions_low": "/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-merge/execution/glob-48a8cc5b582f5a9b84d09795d92566c4/merged_collisions_lowmapq.bam",
+        "out_alignable": ["/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-align/shard-0/execution/glob-1890eb591bb2a7d7b20ad8674fb9113a/alignable.bam"],
+        "out_unmapped": ["/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-align/shard-0/execution/glob-3e8d0b0ad8d7b395c65e466caea64369/unmapped.bam"],
+        "out_dedup": "/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-dedup/execution/glob-4597e8834cf225f807c30b0caec03863/merged_nodups.txt",
+        "out_mapq0": ["/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-align/shard-0/execution/glob-0e332e42297c61a239c20058b776c301/mapq0.bam"],
+        "out_merged_collisions": "/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-merge/execution/glob-f2d22b942f49793caf6b0993e2b0610c/merged_collisions.bam",
+        "out_merged_mapq0": "/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-merge/execution/glob-49d2d8d8c6612815b97beab28ee8c9c0/merged_mapq0.bam",
+        "out_merged_align": "/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-merge/execution/glob-4709a86f566f9145e550ae2160fbf105/merged_alignable.bam",
+        "out_merged_unmapped": "/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-merge/execution/glob-424a3f9a758fbfe7eb85506bcfc0051c/merged_unmapped.bam",
+        "out_collisions_low": ["/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-align/shard-0/execution/glob-a07e75a530220ee3ab115c6819e710f8/collisions_low_mapq.bam"]
+      },
+      "inputs": {
+        "sub_input_merged_sort": null,
+        "sub_input_sort_files": [],
+        "sub_restriction_sites": "/Users/anacismaru/ENCODE/bucket/encode-hic-pipeline-Freference_grch38_chr10_chrM-FGRCh38_no_alt_analysis_set_GCA_000001405.15.chr19_chrM_MboI.txt",
+        "sub_input_bams": [],
+        "sub_reference_index": "/Users/anacismaru/ENCODE/bucket/index.tar.gz",
+        "align.cpu": null,
+        "sub_fastq": [["/Users/anacismaru/ENCODE/bucket/read_pairs/original_pair/read_R1.fastq.gz", "/Users/anacismaru/ENCODE/bucket/read_pairs/original_pair/read_R2.fastq.gz"]],
+        "sub_chrsz": "/Users/anacismaru/ENCODE/bucket/encode-hic-pipeline-Freference_grch38_chr10_chrM-Fhg38_chr19_chrM.chrom.sizes"
+      },
+      "end": "2018-07-12T15:55:23.917616-07:00",
+      "attempt": 1,
+      "executionEvents": [{
+        "startTime": "2018-07-12T15:52:31.458685-07:00",
+        "description": "SubWorkflowPendingState",
+        "endTime": "2018-07-12T15:52:31.464306-07:00"
+      }, {
+        "startTime": "2018-07-12T15:52:31.467556-07:00",
+        "description": "SubWorkflowPreparingState",
+        "endTime": "2018-07-12T15:52:31.478053-07:00"
+      }, {
+        "startTime": "2018-07-12T15:52:31.464306-07:00",
+        "description": "WaitingForValueStore",
+        "endTime": "2018-07-12T15:52:31.467556-07:00"
+      }, {
+        "startTime": "2018-07-12T15:52:31.478053-07:00",
+        "description": "SubWorkflowRunningState",
+        "endTime": "2018-07-12T15:55:23.916601-07:00"
+      }],
+      "start": "2018-07-12T15:52:31.456692-07:00"
+    }],
+    "hic.merge_pairs_file": [{
+      "executionStatus": "Done",
+      "stdout": "/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-merge_pairs_file/execution/stdout",
+      "backendStatus": "Done",
+      "shardIndex": -1,
+      "outputs": {
+        "out_file": "/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-merge_pairs_file/execution/glob-28a2611301572cea1d350945fbaa76d8/merged_pairs.txt"
+      },
+      "runtimeAttributes": {
+        "docker": "quay.io/gabdank/juicer:encode05022018",
+        "failOnStderr": "false",
+        "maxRetries": "0",
+        "continueOnReturnCode": "0"
+      },
+      "callCaching": {
+        "allowResultReuse": false,
+        "effectiveCallCachingMode": "CallCachingOff"
+      },
+      "inputs": {
+        "not_merged_pe": ["/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-dedup/execution/glob-4597e8834cf225f807c30b0caec03863/merged_nodups.txt"]
+      },
+      "returnCode": 0,
+      "jobId": "32344",
+      "backend": "Local",
+      "end": "2018-07-12T15:55:33.325063-07:00",
+      "dockerImageUsed": "quay.io/gabdank/juicer@sha256:a2fec5436c6ca27d3558293fb779dfcdd62147ac4407252e2b70d813e99ece09",
+      "stderr": "/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-merge_pairs_file/execution/stderr",
+      "callRoot": "/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-merge_pairs_file",
+      "attempt": 1,
+      "executionEvents": [{
+        "startTime": "2018-07-12T15:55:28.815560-07:00",
+        "description": "PreparingJob",
+        "endTime": "2018-07-12T15:55:28.819117-07:00"
+      }, {
+        "startTime": "2018-07-12T15:55:27.907524-07:00",
+        "description": "RequestingExecutionToken",
+        "endTime": "2018-07-12T15:55:28.814483-07:00"
+      }, {
+        "startTime": "2018-07-12T15:55:27.907215-07:00",
+        "description": "Pending",
+        "endTime": "2018-07-12T15:55:27.907524-07:00"
+      }, {
+        "startTime": "2018-07-12T15:55:28.819117-07:00",
+        "description": "RunningJob",
+        "endTime": "2018-07-12T15:55:33.324850-07:00"
+      }, {
+        "startTime": "2018-07-12T15:55:33.324850-07:00",
+        "description": "UpdatingJobStore",
+        "endTime": "2018-07-12T15:55:33.325003-07:00"
+      }, {
+        "startTime": "2018-07-12T15:55:28.814483-07:00",
+        "description": "WaitingForValueStore",
+        "endTime": "2018-07-12T15:55:28.815560-07:00"
+      }],
+      "start": "2018-07-12T15:55:27.907088-07:00"
+    }]
+  },
+  "outputs": {
+    "hic.hic_sub.out_merge_sort": ["/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-merge_sort/execution/glob-3fca55958f9e521cf685cb69bb0cba48/merged_sort.txt"],
+    "hic.hic_sub.out_merged_unmapped": ["/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-merge/execution/glob-424a3f9a758fbfe7eb85506bcfc0051c/merged_unmapped.bam"],
+    "hic.hic_sub.out_collisions_low": [["/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-align/shard-0/execution/glob-a07e75a530220ee3ab115c6819e710f8/collisions_low_mapq.bam"]],
+    "hic.hic_sub.out_mapq0": [["/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-align/shard-0/execution/glob-0e332e42297c61a239c20058b776c301/mapq0.bam"]],
+    "hic.hic_sub.out_merged_mapq0": ["/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-merge/execution/glob-49d2d8d8c6612815b97beab28ee8c9c0/merged_mapq0.bam"],
+    "hic.hic_sub.out_merged_collisions": ["/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-merge/execution/glob-f2d22b942f49793caf6b0993e2b0610c/merged_collisions.bam"],
+    "hic.hic_sub.out_collisions": [["/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-align/shard-0/execution/glob-b76556d4d7bc657e18489b542e50e2dd/collisions.bam"]],
+    "hic.hic_sub.out_merged_align": ["/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-merge/execution/glob-4709a86f566f9145e550ae2160fbf105/merged_alignable.bam"],
+    "hic.hic_sub.out_unmapped": [["/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-align/shard-0/execution/glob-3e8d0b0ad8d7b395c65e466caea64369/unmapped.bam"]],
+    "hic.hic_sub.out_sort_file": [["/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-align/shard-0/execution/glob-d1c69b66aa3b2f1a221725e00cd2ae8c/sort.txt"]],
+    "hic.hic_sub.out_dedup": ["/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-dedup/execution/glob-4597e8834cf225f807c30b0caec03863/merged_nodups.txt"],
+    "hic.hic_sub.out_merged_collisions_low": ["/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-merge/execution/glob-48a8cc5b582f5a9b84d09795d92566c4/merged_collisions_lowmapq.bam"],
+    "hic.hic_sub.out_alignable": [["/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-hic_sub/shard-0/hic_sub/60780079-4b53-43d4-9fa5-d7352743ab17/call-align/shard-0/execution/glob-1890eb591bb2a7d7b20ad8674fb9113a/alignable.bam"]],
+    "hic.merge_pairs_file.out_file": "/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db/call-merge_pairs_file/execution/glob-28a2611301572cea1d350945fbaa76d8/merged_pairs.txt"
+  },
+  "workflowRoot": "/Users/anacismaru/ENCODE/hic-pipeline/cromwell-executions/hic/790d97bd-2f95-4d13-b624-0cf516cc51db",
+  "actualWorkflowLanguage": "WDL",
+  "id": "790d97bd-2f95-4d13-b624-0cf516cc51db",
+  "inputs": {
+    "hic.hic_sub.align.cpu": null,
+    "hic.input_merged_sort": [],
+    "hic.input_sort_files": [],
+    "hic.input_bams": [],
+    "hic.fastq": [[["/Users/anacismaru/ENCODE/bucket/read_pairs/original_pair/read_R1.fastq.gz", "/Users/anacismaru/ENCODE/bucket/read_pairs/original_pair/read_R2.fastq.gz"]]],
+    "hic.restriction_sites": "/Users/anacismaru/ENCODE/bucket/encode-hic-pipeline-Freference_grch38_chr10_chrM-FGRCh38_no_alt_analysis_set_GCA_000001405.15.chr19_chrM_MboI.txt",
+    "hic.reference_index": "/Users/anacismaru/ENCODE/bucket/index.tar.gz",
+    "hic.input_dedup_pairs": [],
+    "hic.chrsz": "/Users/anacismaru/ENCODE/bucket/encode-hic-pipeline-Freference_grch38_chr10_chrM-Fhg38_chr19_chrM.chrom.sizes",
+    "hic.input_pairs": null,
+    "hic.sub_ms": null,
+    "hic.input_hic": null
+  },
+  "labels": {
+    "cromwell-workflow-id": "cromwell-790d97bd-2f95-4d13-b624-0cf516cc51db"
+  },
+  "submission": "2018-07-12T15:52:23.857744-07:00",
+  "status": "Succeeded",
+  "end": "2018-07-12T15:55:35.066248-07:00",
+  "start": "2018-07-12T15:52:23.940748-07:00"
+}
